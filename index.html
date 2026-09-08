@@ -61,9 +61,9 @@
     <!-- Firebase SDK Modular Import -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } 
+        import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, deleteUser } 
         from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc } 
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc, query, where } 
         from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const firebaseConfig = {
@@ -87,8 +87,8 @@
 
         window.FB_MODULE = {
             app, db, auth,
-            GoogleAuthProvider, signInWithPopup, onAuthStateChanged,
-            doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc
+            GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut, deleteUser,
+            doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc, query, where
         };
     </script>
 
@@ -190,6 +190,10 @@
 
         function App() {
             const [apps, setApps] = useState([]);
+            const [approvedAppsList, setApprovedAppsList] = useState([]);
+            const [myAppsList, setMyAppsList] = useState([]);
+            const [pendingAppsList, setPendingAppsList] = useState([]);
+
             const [selectedCategory, setSelectedCategory] = useState('전체');
             const [searchQuery, setSearchQuery] = useState('');
             const [activeTab, setActiveTab] = useState('home'); // 'home' | 'my_apps' | 'admin'
@@ -200,12 +204,22 @@
             const [rejectionReason, setRejectionReason] = useState('');
             const [toast, setToast] = useState(null);
 
-            // 로그인 사용자 상태 정보 (초기값 null/user)
+            const [deleteAppTarget, setDeleteAppTarget] = useState(null);
+            const [adminSubTab, setAdminSubTab] = useState('pending'); // 'pending' | 'all'
+
+            // 계정 관련 모달 및 메뉴 상태
+            const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+            const [isAccountInfoOpen, setIsAccountInfoOpen] = useState(false);
+            const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+            const accountMenuRef = useRef(null);
+
+            // 로그인 사용자 상태 정보
             const [currentUser, setCurrentUser] = useState({
                 uid: null,
                 role: 'user',
                 name: '',
-                email: ''
+                email: '',
+                photoURL: ''
             });
 
             // 업로드 관리
@@ -217,96 +231,227 @@
                 setToast({ message, type });
             };
 
+            // 계정 메뉴 외부 클릭 감지하여 닫기
+            useEffect(() => {
+                const handleClickOutside = (event) => {
+                    if (accountMenuRef.current && !accountMenuRef.current.contains(event.target)) {
+                        setIsAccountMenuOpen(false);
+                    }
+                };
+                document.addEventListener('mousedown', handleClickOutside);
+                return () => document.removeEventListener('mousedown', handleClickOutside);
+            }, []);
+
             // Google 로그인 핸들러
-            const handleGoogleLogin = () => {
+            const handleGoogleLogin = async () => {
                 if (window.FB_MODULE && window.FB_MODULE.auth) {
                     const { auth, GoogleAuthProvider, signInWithPopup } = window.FB_MODULE;
                     const provider = new GoogleAuthProvider();
-                    signInWithPopup(auth, provider).catch(error => {
+                    try {
+                        await signInWithPopup(auth, provider);
+                        showToast("성공적으로 로그인되었습니다.");
+                    } catch (error) {
                         console.error("Google 로그인 실패:", error);
-                        showToast("로그인 실패: 다시 시도해주세요.", "error");
-                    });
+                        showToast("로그인에 실패했습니다. 다시 시도해주세요.", "error");
+                    }
                 }
             };
 
-            // Firebase 실시간 바인딩 및 구글 인증 상태 처리
-            useEffect(() => {
-                let unsubscribe = null;
-                const checkAndInitFB = async () => {
-                    if (window.FB_MODULE && window.FB_MODULE.db) {
-                        const { db, auth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, doc, getDoc, setDoc, collection, onSnapshot } = window.FB_MODULE;
-
-                        // Google 로그인 & Firestore 사용자 role 검증
-                        onAuthStateChanged(auth, async (user) => {
-                            if (user) {
-                                try {
-                                    const userRef = doc(db, "users", user.uid);
-                                    const userSnap = await getDoc(userRef);
-                                    if (userSnap.exists()) {
-                                        const userData = userSnap.data();
-                                        setCurrentUser({
-                                            uid: user.uid,
-                                            role: userData.role || "user",
-                                            name: user.displayName || "사용자",
-                                            email: user.email || ""
-                                        });
-                                    } else {
-                                        // 신규 사용자 등록
-                                        await setDoc(userRef, {
-                                            role: "user",
-                                            name: user.displayName || "",
-                                            email: user.email || "",
-                                            createdAt: new Date().toISOString()
-                                        });
-                                        setCurrentUser({
-                                            uid: user.uid,
-                                            role: "user",
-                                            name: user.displayName || "사용자",
-                                            email: user.email || ""
-                                        });
-                                    }
-                                } catch (error) {
-                                    console.error("사용자 정보 불러오기 실패:", error);
-                                }
-                            } else {
-                                // 로그인되지 않은 상태 처리
-                                setCurrentUser({ uid: null, role: 'user', name: '', email: '' });
-                            }
-                        });
-
-                        // Firestore 'apps' 컬렉션 실시간 구독
-                        try {
-                            const appsRef = collection(db, 'apps');
-                            unsubscribe = onSnapshot(appsRef, (snapshot) => {
-                                const fetched = [];
-                                snapshot.forEach((docSnap) => {
-                                    fetched.push({ id: docSnap.id, ...docSnap.data() });
-                                });
-
-                                if (fetched.length === 0) {
-                                    setApps(INITIAL_APPS);
-                                } else {
-                                    setApps(fetched);
-                                }
-                            }, (error) => {
-                                console.error("Firestore 수신 에러:", error);
-                                setApps(INITIAL_APPS);
-                            });
-                        } catch (err) {
-                            console.error("Firestore 연결 모드 오류", err);
-                            setApps(INITIAL_APPS);
+            // 로그아웃 핸들러
+            const handleLogout = async () => {
+                setIsAccountMenuOpen(false);
+                if (window.FB_MODULE && window.FB_MODULE.auth) {
+                    const { auth, signOut } = window.FB_MODULE;
+                    try {
+                        await signOut(auth);
+                        setCurrentUser({ uid: null, role: 'user', name: '', email: '', photoURL: '' });
+                        if (activeTab === 'my_apps' || activeTab === 'admin') {
+                            setActiveTab('home');
                         }
-                    } else {
-                        setApps(INITIAL_APPS);
+                        showToast("로그아웃 되었습니다.");
+                    } catch (error) {
+                        console.error("로그아웃 실패:", error);
+                        showToast("로그아웃 실패: 네트워크 상태를 확인하세요.", "error");
                     }
-                };
+                }
+            };
 
-                checkAndInitFB();
+            // 계정 삭제 핸들러
+            const handleDeleteAccount = async () => {
+                if (!currentUser.uid) return;
+                setIsDeleteModalOpen(false);
+                setIsAccountMenuOpen(false);
+
+                if (window.FB_MODULE && window.FB_MODULE.auth && window.FB_MODULE.db) {
+                    const { auth, db, deleteUser, doc, deleteDoc } = window.FB_MODULE;
+                    const firebaseUser = auth.currentUser;
+
+                    try {
+                        // 1. Firestore users/{uid} 문서 삭제
+                        const userRef = doc(db, "users", currentUser.uid);
+                        await deleteDoc(userRef);
+
+                        // 2. Firebase Auth 사용자 계정 삭제 (apps 문서는 유지됨)
+                        if (firebaseUser) {
+                            await deleteUser(firebaseUser);
+                        }
+
+                        setCurrentUser({ uid: null, role: 'user', name: '', email: '', photoURL: '' });
+                        if (activeTab === 'my_apps' || activeTab === 'admin') {
+                            setActiveTab('home');
+                        }
+                        showToast("계정이 안전하게 삭제되었습니다.");
+                    } catch (error) {
+                        console.error("계정 삭제 에러:", error);
+                        if (error.code === 'auth/requires-recent-login') {
+                            showToast("보안을 위해 다시 로그인한 뒤 계정 삭제를 시도해주세요.", "error");
+                        } else {
+                            showToast("계정 삭제 중 오류가 발생했습니다.", "error");
+                        }
+                    }
+                }
+            };
+
+            // 1. 인증 상태 변경 감지 및 users/{uid} 사용자 정보 처리
+            useEffect(() => {
+                if (window.FB_MODULE && window.FB_MODULE.auth) {
+                    const { auth, db, onAuthStateChanged, doc, getDoc, setDoc } = window.FB_MODULE;
+
+                    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            const userRef = doc(db, "users", user.uid);
+                            let userRole = "user";
+                            let userData = null;
+
+                            try {
+                                const userSnap = await getDoc(userRef);
+                                if (userSnap.exists()) {
+                                    userData = userSnap.data();
+                                    userRole = userData.role || "user";
+                                } else {
+                                    // 신규 사용자 문서 자동 생성 (users/{uid})
+                                    const newUserDoc = {
+                                        uid: user.uid,
+                                        role: "user",
+                                        name: user.displayName || "사용자",
+                                        email: user.email || "",
+                                        photoURL: user.photoURL || "",
+                                        createdAt: new Date().toISOString()
+                                    };
+                                    await setDoc(userRef, newUserDoc);
+                                    userData = newUserDoc;
+                                    console.log("Firestore users/{uid} 문서를 성공적으로 생성하였습니다:", user.uid);
+                                }
+                            } catch (error) {
+                                console.error("users/{uid} 문서 조회/생성 중 오류 발생:", error);
+                            }
+
+                            setCurrentUser({
+                                uid: user.uid,
+                                role: userRole,
+                                name: (userData && userData.name) || user.displayName || "사용자",
+                                email: (userData && userData.email) || user.email || "",
+                                photoURL: (userData && userData.photoURL) || user.photoURL || ""
+                            });
+                        } else {
+                            setCurrentUser({ uid: null, role: 'user', name: '', email: '', photoURL: '' });
+                        }
+                    });
+
+                    return () => unsubscribeAuth();
+                }
+            }, []);
+
+            // 2. Security Rules에 정렬된 조건별 Firestore 앱 쿼리 구독
+            useEffect(() => {
+                if (!window.FB_MODULE || !window.FB_MODULE.db) {
+                    setApps(INITIAL_APPS);
+                    return;
+                }
+
+                const { db, collection, query, where, onSnapshot } = window.FB_MODULE;
+                const unsubs = [];
+
+                // (1) 승인된 앱 (status == "approved") - 누구나 읽기 가능
+                try {
+                    const approvedQuery = query(collection(db, 'apps'), where("status", "==", "approved"));
+                    const unsubApproved = onSnapshot(approvedQuery, (snapshot) => {
+                        const fetched = [];
+                        snapshot.forEach((docSnap) => {
+                            fetched.push({ id: docSnap.id, ...docSnap.data() });
+                        });
+                        setApprovedAppsList(fetched);
+                    }, (error) => {
+                        console.error("Approved apps 조회 에러:", error);
+                    });
+                    unsubs.push(unsubApproved);
+                } catch (err) {
+                    console.error("Approved apps query 설정 실패:", err);
+                }
+
+                // (2) 내 앱 (developerId == currentUser.uid) - 로그인 상태에서만 실행
+                if (currentUser.uid) {
+                    try {
+                        const myAppsQuery = query(collection(db, 'apps'), where("developerId", "==", currentUser.uid));
+                        const unsubMyApps = onSnapshot(myAppsQuery, (snapshot) => {
+                            const fetched = [];
+                            snapshot.forEach((docSnap) => {
+                                fetched.push({ id: docSnap.id, ...docSnap.data() });
+                            });
+                            setMyAppsList(fetched);
+                        }, (error) => {
+                            console.error("My apps 조회 에러:", error);
+                        });
+                        unsubs.push(unsubMyApps);
+                    } catch (err) {
+                        console.error("My apps query 설정 실패:", err);
+                    }
+                } else {
+                    setMyAppsList([]);
+                }
+
+                // (3) 관리자용 심사 대기 앱 (status == "pending") - admin 권한 확인 시에만 실행
+                if (currentUser.role === 'admin') {
+                    try {
+                        const pendingQuery = query(collection(db, 'apps'), where("status", "==", "pending"));
+                        const unsubPending = onSnapshot(pendingQuery, (snapshot) => {
+                            const fetched = [];
+                            snapshot.forEach((docSnap) => {
+                                fetched.push({ id: docSnap.id, ...docSnap.data() });
+                            });
+                            setPendingAppsList(fetched);
+                        }, (error) => {
+                            console.error("Pending apps 조회 에러:", error);
+                        });
+                        unsubs.push(unsubPending);
+                    } catch (err) {
+                        console.error("Pending apps query 설정 실패:", err);
+                    }
+                } else {
+                    setPendingAppsList([]);
+                }
 
                 return () => {
-                    if (unsubscribe) unsubscribe();
+                    unsubs.forEach((unsub) => unsub && unsub());
                 };
-            }, []);
+            }, [currentUser.uid, currentUser.role]);
+
+            // 3. 개별 쿼리 결과를 고유 id 기준 Map으로 중복 제거 및 단일 apps 상태로 병합
+            useEffect(() => {
+                const combinedAppsMap = new Map();
+
+                approvedAppsList.forEach((item) => combinedAppsMap.set(item.id, item));
+                myAppsList.forEach((item) => combinedAppsMap.set(item.id, item));
+                pendingAppsList.forEach((item) => combinedAppsMap.set(item.id, item));
+
+                const mergedList = Array.from(combinedAppsMap.values());
+
+                if (mergedList.length === 0 && !currentUser.uid) {
+                    setApps(INITIAL_APPS);
+                } else {
+                    setApps(mergedList);
+                }
+            }, [approvedAppsList, myAppsList, pendingAppsList, currentUser.uid]);
 
             // 아이콘 업로드
             const handleIconFileChange = async (e) => {
@@ -438,6 +583,34 @@
                 setRejectionReason('');
             };
 
+            // 관리자 전용 앱 삭제 함수
+            const handleDeleteApp = async (appId) => {
+                if (currentUser.role !== 'admin') {
+                    showToast("관리자 권한이 필요합니다.", "error");
+                    return;
+                }
+
+                if (window.FB_MODULE && window.FB_MODULE.db) {
+                    try {
+                        const { db, doc, deleteDoc } = window.FB_MODULE;
+                        const appRef = doc(db, 'apps', appId);
+                        await deleteDoc(appRef);
+                        showToast("웹앱이 성공적으로 삭제되었습니다.");
+                    } catch (err) {
+                        console.error("앱 삭제 실패:", err);
+                        showToast("삭제 실패: 권한 또는 네트워크 상태를 확인하세요.", "error");
+                    }
+                } else {
+                    setApps(prev => prev.filter(a => a.id !== appId));
+                    showToast("웹앱이 삭제되었습니다.");
+                }
+
+                setDeleteAppTarget(null);
+                if (selectedApp && selectedApp.id === appId) {
+                    setSelectedApp(null);
+                }
+            };
+
             // 필터링된 데이터 목록
             const approvedApps = useMemo(() => {
                 return apps.filter(app => {
@@ -486,24 +659,92 @@
                             </div>
 
                             <div className="flex items-center space-x-2">
-                                {currentUser.uid ? (
-                                    <div className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-neutral-100 rounded-lg text-xs font-medium text-neutral-800">
-                                        <i className="fas fa-user-circle text-neutral-500"></i>
-                                        <span className="max-w-[100px] truncate">{currentUser.name || '사용자'}</span>
-                                        {currentUser.role === 'admin' && (
-                                            <span className="ml-1 px-1.5 py-0.2 bg-neutral-900 text-white text-[10px] rounded font-bold">
-                                                ADMIN
-                                            </span>
-                                        )}
-                                    </div>
-                                ) : (
+                                {/* 로그인 전 [로그인] 버튼 vs 로그인 후 [계정] 드롭다운 버튼 */}
+                                {!currentUser.uid ? (
                                     <button
                                         onClick={handleGoogleLogin}
-                                        className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-100 text-neutral-700 hover:bg-neutral-200 transition-colors flex items-center space-x-1"
+                                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-neutral-100 text-neutral-800 hover:bg-neutral-200 transition-colors flex items-center space-x-1.5 border border-neutral-200"
                                     >
                                         <i className="fab fa-google text-xs text-rose-500"></i>
                                         <span>로그인</span>
                                     </button>
+                                ) : (
+                                    <div className="relative" ref={accountMenuRef}>
+                                        <button
+                                            onClick={() => setIsAccountMenuOpen(prev => !prev)}
+                                            className="flex items-center space-x-2 px-2.5 py-1.5 bg-white border border-neutral-200 hover:border-neutral-300 rounded-xl text-xs font-medium text-neutral-800 shadow-xs transition-all"
+                                        >
+                                            {currentUser.photoURL ? (
+                                                <img 
+                                                    src={currentUser.photoURL} 
+                                                    alt="Profile" 
+                                                    className="w-5 h-5 rounded-full object-cover border border-neutral-200"
+                                                />
+                                            ) : (
+                                                <i className="fas fa-user-circle text-base text-neutral-500"></i>
+                                            )}
+                                            <span className="max-w-[100px] truncate font-semibold">{currentUser.name || '계정'}</span>
+                                            {currentUser.role === 'admin' && (
+                                                <span className="px-1.5 py-0.2 bg-neutral-900 text-white text-[9px] rounded font-bold">
+                                                    ADMIN
+                                                </span>
+                                            )}
+                                            <i className={`fas fa-chevron-down text-[10px] text-neutral-400 transition-transform ${isAccountMenuOpen ? 'rotate-180' : ''}`}></i>
+                                        </button>
+
+                                        {/* 계정 드롭다운 메뉴 */}
+                                        {isAccountMenuOpen && (
+                                            <div className="absolute right-0 mt-2 w-48 bg-white border border-neutral-200 rounded-xl shadow-xl py-1 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
+                                                <div className="px-3 py-2 border-b border-neutral-100">
+                                                    <p className="font-bold text-neutral-900 truncate">{currentUser.name || '사용자'}</p>
+                                                    <p className="text-[10px] text-neutral-400 truncate">{currentUser.email}</p>
+                                                </div>
+
+                                                <button
+                                                    onClick={() => {
+                                                        setIsAccountMenuOpen(false);
+                                                        setIsAccountInfoOpen(true);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-neutral-700 hover:bg-neutral-50 flex items-center space-x-2 transition-colors"
+                                                >
+                                                    <i className="fas fa-user text-neutral-400 w-4"></i>
+                                                    <span>내 계정</span>
+                                                </button>
+
+                                                <button
+                                                    onClick={() => {
+                                                        setIsAccountMenuOpen(false);
+                                                        setActiveTab('my_apps');
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-neutral-700 hover:bg-neutral-50 flex items-center space-x-2 transition-colors"
+                                                >
+                                                    <i className="fas fa-layer-group text-neutral-400 w-4"></i>
+                                                    <span>내가 등록한 앱 ({myApps.length})</span>
+                                                </button>
+
+                                                <div className="border-t border-neutral-100 my-1"></div>
+
+                                                <button
+                                                    onClick={handleLogout}
+                                                    className="w-full text-left px-3 py-2 text-neutral-700 hover:bg-neutral-50 flex items-center space-x-2 transition-colors"
+                                                >
+                                                    <i className="fas fa-sign-out-alt text-neutral-400 w-4"></i>
+                                                    <span>로그아웃</span>
+                                                </button>
+
+                                                <button
+                                                    onClick={() => {
+                                                        setIsAccountMenuOpen(false);
+                                                        setIsDeleteModalOpen(true);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-rose-600 hover:bg-rose-50 flex items-center space-x-2 transition-colors"
+                                                >
+                                                    <i className="fas fa-user-slash text-rose-400 w-4"></i>
+                                                    <span>계정 삭제</span>
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
                                 )}
 
                                 <button
@@ -754,74 +995,244 @@
                     {/* 3. 검수 대시보드 (관리자 전용) */}
                     {activeTab === 'admin' && currentUser.role === 'admin' && (
                         <main className="space-y-4">
-                            <div className="flex items-center justify-between">
-                                <h2 className="text-sm font-bold text-neutral-900">검수 대기중인 신청 목록</h2>
-                                <span className="text-xs bg-rose-100 text-rose-700 font-semibold px-2 py-0.5 rounded">
-                                    {pendingApps.length}건
-                                </span>
+                            <div className="flex items-center justify-between border-b border-neutral-100 pb-3">
+                                <div className="flex space-x-2">
+                                    <button
+                                        onClick={() => setAdminSubTab('pending')}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                                            adminSubTab === 'pending'
+                                                ? 'bg-neutral-900 text-white'
+                                                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                                        }`}
+                                    >
+                                        검수 대기 ({pendingApps.length})
+                                    </button>
+                                    <button
+                                        onClick={() => setAdminSubTab('all')}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                                            adminSubTab === 'all'
+                                                ? 'bg-neutral-900 text-white'
+                                                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                                        }`}
+                                    >
+                                        전체 웹앱 관리 ({apps.length})
+                                    </button>
+                                </div>
                             </div>
 
-                            {pendingApps.length === 0 ? (
-                                <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
-                                    <p className="text-neutral-400 text-xs">대기 중인 검수 요청이 없습니다.</p>
-                                </div>
-                            ) : (
-                                <div className="space-y-3">
-                                    {pendingApps.map((app) => (
-                                        <div key={app.id} className="bg-white border border-neutral-200/80 rounded-xl p-4 space-y-3">
-                                            <div className="flex items-start justify-between gap-4">
-                                                <div className="flex items-start space-x-3">
+                            {/* (1) 검수 대기 목록 */}
+                            {adminSubTab === 'pending' && (
+                                pendingApps.length === 0 ? (
+                                    <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
+                                        <p className="text-neutral-400 text-xs">대기 중인 검수 요청이 없습니다.</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {pendingApps.map((app) => (
+                                            <div key={app.id} className="bg-white border border-neutral-200/80 rounded-xl p-4 space-y-3 shadow-xs">
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <div className="flex items-start space-x-3">
+                                                        <img
+                                                            src={app.iconUrl}
+                                                            className="w-12 h-12 rounded-xl object-cover border border-neutral-100 flex-shrink-0"
+                                                        />
+                                                        <div>
+                                                            <h3 className="font-bold text-sm text-neutral-900">{app.name}</h3>
+                                                            <p className="text-xs text-neutral-500 mt-0.5">{app.shortDescription}</p>
+                                                            <p className="text-[10px] text-neutral-400 mt-1">
+                                                                개발자: {app.developer} • 신청일: {app.createdAt}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+
+                                                    <a
+                                                        href={app.url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-semibold rounded-md flex items-center space-x-1"
+                                                    >
+                                                        <span>사이트 이동</span>
+                                                        <i className="fas fa-external-link-alt text-[9px]"></i>
+                                                    </a>
+                                                </div>
+
+                                                {app.screenshots && app.screenshots.length > 0 && (
+                                                    <div className="flex space-x-2 overflow-x-auto no-scrollbar py-1">
+                                                        {app.screenshots.map((img, idx) => (
+                                                            <img key={idx} src={img} className="h-24 rounded-lg object-cover border border-neutral-200" />
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                <div className="flex items-center justify-between pt-2 border-t border-neutral-100">
+                                                    <button
+                                                        onClick={() => setDeleteAppTarget(app)}
+                                                        className="px-3 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50 font-medium flex items-center space-x-1"
+                                                    >
+                                                        <i className="fas fa-trash-alt text-[10px]"></i>
+                                                        <span>삭제</span>
+                                                    </button>
+                                                    
+                                                    <div className="flex items-center space-x-2">
+                                                        <button
+                                                            onClick={() => setRejectionModalApp(app)}
+                                                            className="px-3 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50"
+                                                        >
+                                                            거절
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleUpdateStatus(app.id, 'approved')}
+                                                            className="px-4 py-1 text-xs bg-neutral-900 text-white font-semibold rounded-lg hover:bg-neutral-800"
+                                                        >
+                                                            승인 및 공개
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )
+                            )}
+
+                            {/* (2) 전체 웹앱 목록 (삭제/상태 관리) */}
+                            {adminSubTab === 'all' && (
+                                apps.length === 0 ? (
+                                    <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
+                                        <p className="text-neutral-400 text-xs">등록된 앱이 없습니다.</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2.5">
+                                        {apps.map((app) => (
+                                            <div key={app.id} className="bg-white border border-neutral-200/80 rounded-xl p-3.5 flex items-center justify-between gap-4 shadow-xs">
+                                                <div className="flex items-center space-x-3 min-w-0">
                                                     <img
                                                         src={app.iconUrl}
-                                                        className="w-12 h-12 rounded-xl object-cover border border-neutral-100 flex-shrink-0"
+                                                        className="w-10 h-10 rounded-xl object-cover border border-neutral-100 flex-shrink-0"
                                                     />
-                                                    <div>
-                                                        <h3 className="font-bold text-sm text-neutral-900">{app.name}</h3>
-                                                        <p className="text-xs text-neutral-500 mt-0.5">{app.shortDescription}</p>
-                                                        <p className="text-[10px] text-neutral-400 mt-1">
-                                                            개발자: {app.developer} • 신청일: {app.createdAt}
-                                                        </p>
+                                                    <div className="min-w-0">
+                                                        <div className="flex items-center space-x-2">
+                                                            <h3 className="font-bold text-xs text-neutral-900 truncate">{app.name}</h3>
+                                                            <span className="text-[10px] text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
+                                                                {app.category}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-[11px] text-neutral-500 truncate mt-0.5">개발자: {app.developer}</p>
                                                     </div>
                                                 </div>
 
-                                                <a
-                                                    href={app.url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-semibold rounded-md flex items-center space-x-1"
-                                                >
-                                                    <span>사이트 이동</span>
-                                                    <i className="fas fa-external-link-alt text-[9px]"></i>
-                                                </a>
-                                            </div>
+                                                <div className="flex items-center space-x-2 flex-shrink-0">
+                                                    {app.status === 'approved' && (
+                                                        <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200/60">
+                                                            공개중
+                                                        </span>
+                                                    )}
+                                                    {app.status === 'pending' && (
+                                                        <span className="text-[10px] font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-200/60">
+                                                            검토중
+                                                        </span>
+                                                    )}
+                                                    {app.status === 'rejected' && (
+                                                        <span className="text-[10px] font-semibold text-rose-600 bg-rose-50 px-2 py-0.5 rounded border border-rose-200/60">
+                                                            거절됨
+                                                        </span>
+                                                    )}
 
-                                            {app.screenshots && app.screenshots.length > 0 && (
-                                                <div className="flex space-x-2 overflow-x-auto no-scrollbar py-1">
-                                                    {app.screenshots.map((img, idx) => (
-                                                        <img key={idx} src={img} className="h-24 rounded-lg object-cover border border-neutral-200" />
-                                                    ))}
+                                                    <button
+                                                        onClick={() => setSelectedApp(app)}
+                                                        className="px-2.5 py-1 text-xs border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50"
+                                                    >
+                                                        상세
+                                                    </button>
+                                                    
+                                                    <button
+                                                        onClick={() => setDeleteAppTarget(app)}
+                                                        className="px-2.5 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50 flex items-center space-x-1"
+                                                    >
+                                                        <i className="fas fa-trash-alt text-[10px]"></i>
+                                                        <span>삭제</span>
+                                                    </button>
                                                 </div>
-                                            )}
-
-                                            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-neutral-100">
-                                                <button
-                                                    onClick={() => setRejectionModalApp(app)}
-                                                    className="px-3 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50"
-                                                >
-                                                    거절
-                                                </button>
-                                                <button
-                                                    onClick={() => handleUpdateStatus(app.id, 'approved')}
-                                                    className="px-4 py-1 text-xs bg-neutral-900 text-white font-semibold rounded-lg hover:bg-neutral-800"
-                                                >
-                                                    승인 및 공개
-                                                </button>
                                             </div>
-                                        </div>
-                                    ))}
-                                </div>
+                                        ))}
+                                    </div>
+                                )
                             )}
                         </main>
+                    )}
+
+                    {/* 내 계정 정보 모달 */}
+                    {isAccountInfoOpen && (
+                        <div className="fixed inset-0 z-50 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl relative border border-neutral-100 space-y-4">
+                                <button
+                                    onClick={() => setIsAccountInfoOpen(false)}
+                                    className="absolute top-4 right-4 w-7 h-7 bg-neutral-100 hover:bg-neutral-200 text-neutral-500 rounded-full flex items-center justify-center"
+                                >
+                                    <i className="fas fa-times text-xs"></i>
+                                </button>
+
+                                <div className="text-center space-y-2">
+                                    {currentUser.photoURL ? (
+                                        <img src={currentUser.photoURL} className="w-16 h-16 rounded-full mx-auto object-cover border border-neutral-200" />
+                                    ) : (
+                                        <i className="fas fa-user-circle text-5xl text-neutral-400"></i>
+                                    )}
+                                    <h3 className="font-bold text-base text-neutral-900">{currentUser.name || '사용자'}</h3>
+                                    <p className="text-xs text-neutral-500">{currentUser.email}</p>
+                                </div>
+
+                                <div className="bg-neutral-50 p-3 rounded-xl border border-neutral-100 space-y-1 text-xs">
+                                    <div className="flex justify-between">
+                                        <span className="text-neutral-400">UID:</span>
+                                        <span className="font-mono text-[10px] text-neutral-700 font-semibold">{currentUser.uid}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-neutral-400">권한 (Role):</span>
+                                        <span className="font-semibold text-neutral-800 uppercase">{currentUser.role}</span>
+                                    </div>
+                                </div>
+
+                                <button
+                                    onClick={() => setIsAccountInfoOpen(false)}
+                                    className="w-full py-2 bg-neutral-900 text-white rounded-xl text-xs font-semibold hover:bg-neutral-800"
+                                >
+                                    닫기
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 계정 삭제 확인 모달 */}
+                    {isDeleteModalOpen && (
+                        <div className="fixed inset-0 z-50 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-xs w-full p-5 shadow-xl border border-neutral-100 space-y-3">
+                                <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto text-base">
+                                    <i className="fas fa-exclamation-triangle"></i>
+                                </div>
+
+                                <div className="text-center space-y-1">
+                                    <h3 className="text-sm font-bold text-neutral-900">정말 계정을 삭제하시겠습니까?</h3>
+                                    <p className="text-xs text-neutral-500">
+                                        계정을 삭제하면 프로필 및 Firestore 저장 정보가 즉시 제거되며 이 작업은 되돌릴 수 없습니다.
+                                    </p>
+                                </div>
+
+                                <div className="flex justify-end space-x-2 pt-2">
+                                    <button
+                                        onClick={() => setIsDeleteModalOpen(false)}
+                                        className="w-1/2 py-2 border border-neutral-200 text-neutral-600 text-xs rounded-xl font-medium"
+                                    >
+                                        취소
+                                    </button>
+                                    <button
+                                        onClick={handleDeleteAccount}
+                                        className="w-1/2 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold rounded-xl transition-colors"
+                                    >
+                                        삭제 확정
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     )}
 
                     {/* 앱 상세 모달 */}
@@ -872,12 +1283,21 @@
                                     </p>
                                 </div>
 
-                                <div className="pt-2">
+                                <div className="pt-2 flex items-center space-x-2">
+                                    {currentUser.role === 'admin' && (
+                                        <button
+                                            onClick={() => setDeleteAppTarget(selectedApp)}
+                                            className="w-1/3 py-2.5 border border-rose-200 hover:bg-rose-50 text-rose-600 font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition-colors"
+                                        >
+                                            <i className="fas fa-trash-alt text-[10px]"></i>
+                                            <span>삭제</span>
+                                        </button>
+                                    )}
                                     <a
                                         href={selectedApp.url}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5"
+                                        className={`${currentUser.role === 'admin' ? 'w-2/3' : 'w-full'} py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition-colors`}
                                     >
                                         <span>웹앱 바로가기</span>
                                         <i className="fas fa-arrow-up-right-from-square text-[10px]"></i>
@@ -1040,6 +1460,40 @@
                                         className="px-3 py-1 bg-rose-600 text-white text-xs font-semibold rounded-lg"
                                     >
                                         거절 처리
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {}
+                    {/* 관리자 앱 삭제 확인 모달 */}
+                    {deleteAppTarget && (
+                        <div className="fixed inset-0 z-50 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-xs w-full p-5 shadow-xl border border-neutral-100 space-y-3">
+                                <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto text-base">
+                                    <i className="fas fa-trash-alt"></i>
+                                </div>
+
+                                <div className="text-center space-y-1">
+                                    <h3 className="text-sm font-bold text-neutral-900">웹앱 삭제 확인</h3>
+                                    <p className="text-xs text-neutral-500">
+                                        <strong className="text-neutral-800">{deleteAppTarget.name}</strong> 앱을 정말 삭제하시겠습니까? 삭제 후에는 복구할 수 없습니다.
+                                    </p>
+                                </div>
+
+                                <div className="flex justify-end space-x-2 pt-2">
+                                    <button
+                                        onClick={() => setDeleteAppTarget(null)}
+                                        className="w-1/2 py-2 border border-neutral-200 text-neutral-600 text-xs rounded-xl font-medium hover:bg-neutral-50 transition-colors"
+                                    >
+                                        취소
+                                    </button>
+                                    <button
+                                        onClick={() => handleDeleteApp(deleteAppTarget.id)}
+                                        className="w-1/2 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold rounded-xl transition-colors"
+                                    >
+                                        삭제 확정
                                     </button>
                                 </div>
                             </div>
