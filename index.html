@@ -137,7 +137,8 @@
             });
         };
 
-        const CATEGORIES = ['전체', '생산성', '공부', '디자인', '개발', '게임', '음악', '금융', '생활', 'AI', '기타'];
+        // '전체' 탭 제거, '추천' 탭 추가
+        const CATEGORIES = ['추천', '생산성', '공부', '디자인', '개발', '게임', '음악', '금융', '생활', 'AI', '기타'];
 
         function Toast({ message, type, onClose }) {
             useEffect(() => {
@@ -158,11 +159,13 @@
             const [approvedAppsList, setApprovedAppsList] = useState([]);
             const [myAppsList, setMyAppsList] = useState([]);
             const [pendingAppsList, setPendingAppsList] = useState([]);
+            const [featuredList, setFeaturedList] = useState([]);
 
-            const [selectedCategory, setSelectedCategory] = useState('전체');
+            const [selectedCategory, setSelectedCategory] = useState('추천');
             const [searchQuery, setSearchQuery] = useState('');
             const [activeTab, setActiveTab] = useState('home'); // 'home' | 'my_apps' | 'admin'
             const [selectedApp, setSelectedApp] = useState(null);
+            const [previewImage, setPreviewImage] = useState(null); // 스크린샷 크게 보기용
             const [isRegisterOpen, setIsRegisterOpen] = useState(false);
             
             const [rejectionModalApp, setRejectionModalApp] = useState(null);
@@ -170,7 +173,11 @@
             const [toast, setToast] = useState(null);
 
             const [deleteAppTarget, setDeleteAppTarget] = useState(null);
-            const [adminSubTab, setAdminSubTab] = useState('pending'); // 'pending' | 'all'
+            const [adminSubTab, setAdminSubTab] = useState('pending'); // 'pending' | 'featured' | 'all'
+
+            // 추천 관리 전용 모달 상태
+            const [featuredModalApp, setFeaturedModalApp] = useState(null);
+            const [featuredMessageInput, setFeaturedMessageInput] = useState('');
 
             // 계정 관련 모달 및 메뉴 상태
             const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
@@ -305,7 +312,6 @@
                                     };
                                     await setDoc(userRef, newUserDoc);
                                     userData = newUserDoc;
-                                    console.log("Firestore users/{uid} 문서를 성공적으로 생성하였습니다:", user.uid);
                                 }
                             } catch (error) {
                                 console.error("users/{uid} 문서 조회/생성 중 오류 발생:", error);
@@ -327,10 +333,11 @@
                 }
             }, []);
 
-            // 2. Security Rules에 정렬된 조건별 Firestore 앱 쿼리 구독
+            // 2. Security Rules에 정렬된 조건별 Firestore 앱 쿼리 구독 & featuredApps 구독
             useEffect(() => {
                 if (!window.FB_MODULE || !window.FB_MODULE.db) {
                     setApps([]);
+                    setFeaturedList([]);
                     return;
                 }
 
@@ -354,7 +361,25 @@
                     console.error("Approved apps query 설정 실패:", err);
                 }
 
-                // (2) 내 앱 (developerId == currentUser.uid) - 로그인 상태에서만 실행
+                // (2) 관리자 추천 데이터 (featuredApps) - active == true, order 오름차순
+                try {
+                    const featuredQuery = query(collection(db, 'featuredApps'), where("active", "==", true));
+                    const unsubFeatured = onSnapshot(featuredQuery, (snapshot) => {
+                        const fetched = [];
+                        snapshot.forEach((docSnap) => {
+                            fetched.push({ id: docSnap.id, ...docSnap.data() });
+                        });
+                        fetched.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
+                        setFeaturedList(fetched);
+                    }, (error) => {
+                        console.error("Featured apps 조회 에러:", error);
+                    });
+                    unsubs.push(unsubFeatured);
+                } catch (err) {
+                    console.error("Featured apps query 설정 실패:", err);
+                }
+
+                // (3) 내 앱 (developerId == currentUser.uid) - 로그인 상태에서만 실행
                 if (currentUser.uid) {
                     try {
                         const myAppsQuery = query(collection(db, 'apps'), where("developerId", "==", currentUser.uid));
@@ -375,7 +400,7 @@
                     setMyAppsList([]);
                 }
 
-                // (3) 관리자용 심사 대기 앱 (status == "pending") - admin 권한 확인 시에만 실행
+                // (4) 관리자용 심사 대기 앱 (status == "pending") - admin 권한 확인 시에만 실행
                 if (currentUser.role === 'admin') {
                     try {
                         const pendingQuery = query(collection(db, 'apps'), where("status", "==", "pending"));
@@ -558,6 +583,14 @@
                         const { db, doc, deleteDoc } = window.FB_MODULE;
                         const appRef = doc(db, 'apps', appId);
                         await deleteDoc(appRef);
+
+                        // 만약 추천 등록되어 있었다면 featuredApps에서도 삭제
+                        try {
+                            await deleteDoc(doc(db, 'featuredApps', appId));
+                        } catch (e) {
+                            // ignore if not featured
+                        }
+
                         showToast("웹앱이 성공적으로 삭제되었습니다.");
                     } catch (err) {
                         console.error("앱 삭제 실패:", err);
@@ -574,17 +607,113 @@
                 }
             };
 
-            // 필터링된 데이터 목록
-            const approvedApps = useMemo(() => {
-                return apps.filter(app => {
-                    const isApproved = app.status === 'approved';
-                    const matchesCat = selectedCategory === '전체' || app.category === selectedCategory;
-                    const matchesSearch = app.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                                          app.shortDescription.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                                          app.category.toLowerCase().includes(searchQuery.toLowerCase());
-                    return isApproved && matchesCat && matchesSearch;
-                });
-            }, [apps, selectedCategory, searchQuery]);
+            // --- 추천 시스템 관련 비즈니스 로직 ---
+            // 추천 등록 / 멘트 수정 저장
+            const handleSaveFeatured = async (e) => {
+                e.preventDefault();
+                if (!featuredModalApp) return;
+                const appId = featuredModalApp.id;
+
+                const existingFeat = featuredList.find(f => f.appId === appId);
+                const maxOrder = featuredList.length > 0 ? Math.max(...featuredList.map(f => Number(f.order) || 0)) : 0;
+                const orderNum = existingFeat ? existingFeat.order : (maxOrder + 1);
+
+                const featData = {
+                    appId: appId,
+                    message: featuredMessageInput.trim(),
+                    order: Number(orderNum),
+                    active: true,
+                    updatedAt: new Date().toISOString()
+                };
+
+                if (window.FB_MODULE && window.FB_MODULE.db) {
+                    try {
+                        const { db, doc, setDoc } = window.FB_MODULE;
+                        await setDoc(doc(db, 'featuredApps', appId), featData);
+                        showToast(existingFeat ? "추천 멘트가 수정되었습니다." : "추천 앱으로 저장되었습니다.");
+                    } catch (err) {
+                        console.error("추천 저장 에러:", err);
+                        showToast("추천 저장 실패: 네트워크 상태를 확인하세요.", "error");
+                    }
+                }
+
+                setFeaturedModalApp(null);
+                setFeaturedMessageInput('');
+            };
+
+            // 추천 제거 (featuredApps에서 삭제)
+            const handleRemoveFeatured = async (appId) => {
+                if (window.FB_MODULE && window.FB_MODULE.db) {
+                    try {
+                        const { db, doc, deleteDoc } = window.FB_MODULE;
+                        await deleteDoc(doc(db, 'featuredApps', appId));
+                        showToast("추천에서 제거되었습니다.");
+                    } catch (err) {
+                        console.error("추천 제거 에러:", err);
+                        showToast("추천 제거 실패", "error");
+                    }
+                }
+            };
+
+            // 추천 순서 변경 (위/아래)
+            const handleMoveFeaturedOrder = async (appId, direction) => {
+                const currentIndex = featuredList.findIndex(f => f.appId === appId);
+                if (currentIndex === -1) return;
+                const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+                if (targetIndex < 0 || targetIndex >= featuredList.length) return;
+
+                const currentFeat = featuredList[currentIndex];
+                const targetFeat = featuredList[targetIndex];
+
+                if (window.FB_MODULE && window.FB_MODULE.db) {
+                    try {
+                        const { db, doc, updateDoc } = window.FB_MODULE;
+                        await updateDoc(doc(db, 'featuredApps', currentFeat.appId), { order: targetFeat.order });
+                        await updateDoc(doc(db, 'featuredApps', targetFeat.appId), { order: currentFeat.order });
+                        showToast("추천 순서가 변경되었습니다.");
+                    } catch (err) {
+                        console.error("순서 변경 실패:", err);
+                    }
+                }
+            };
+
+            // 추천 모달 열기 함수
+            const openFeaturedModal = (app) => {
+                const existing = featuredList.find(f => f.appId === app.id);
+                setFeaturedModalApp(app);
+                setFeaturedMessageInput(existing ? existing.message || '' : '');
+            };
+
+            // 메인 스토어 탭용 앱 데이터 필터링
+            const displayHomeApps = useMemo(() => {
+                // 1. 검색어가 존재하는 경우: 카테고리 상관없이 approved 전체 앱 검색
+                if (searchQuery.trim() !== '') {
+                    return approvedAppsList.filter(app => {
+                        return app.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                               app.shortDescription.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                               app.category.toLowerCase().includes(searchQuery.toLowerCase());
+                    });
+                }
+
+                // 2. '추천' 탭 선택 시
+                if (selectedCategory === '추천') {
+                    const featuredAppsMapped = [];
+                    featuredList.forEach(feat => {
+                        const matchedApp = approvedAppsList.find(a => a.id === feat.appId && a.status === 'approved');
+                        if (matchedApp) {
+                            featuredAppsMapped.push({
+                                ...matchedApp,
+                                featuredMessage: feat.message || '',
+                                featuredOrder: feat.order
+                            });
+                        }
+                    });
+                    return featuredAppsMapped;
+                }
+
+                // 3. 일반 카테고리 선택 시
+                return approvedAppsList.filter(app => app.category === selectedCategory);
+            }, [approvedAppsList, featuredList, selectedCategory, searchQuery]);
 
             const myApps = useMemo(() => {
                 if (!currentUser.uid) return [];
@@ -805,27 +934,36 @@
                                 ))}
                             </div>
 
-                            {approvedApps.length === 0 ? (
+                            {displayHomeApps.length === 0 ? (
                                 <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200/80">
-                                    <p className="text-neutral-500 text-xs mb-2">승인된 웹앱이 없습니다.</p>
-                                    {(selectedCategory !== '전체' || searchQuery) && (
+                                    <p className="text-neutral-500 text-xs mb-2">
+                                        {searchQuery ? "검색 결과가 없습니다." : (selectedCategory === '추천' ? "등록된 추천 웹앱이 없습니다." : "해당 카테고리에 등록된 웹앱이 없습니다.")}
+                                    </p>
+                                    {(selectedCategory !== '추천' || searchQuery) && (
                                         <button
-                                            onClick={() => { setSelectedCategory('전체'); setSearchQuery(''); }}
+                                            onClick={() => { setSelectedCategory('추천'); setSearchQuery(''); }}
                                             className="px-3 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs rounded-lg font-medium transition-colors"
                                         >
-                                            검색 초기화
+                                            추천 탭으로 돌아가기
                                         </button>
                                     )}
                                 </div>
                             ) : (
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                    {approvedApps.map((app) => (
+                                    {displayHomeApps.map((app) => (
                                         <div
                                             key={app.id}
                                             onClick={() => setSelectedApp(app)}
                                             className="bg-white border border-neutral-200/80 rounded-2xl p-4 cursor-pointer hover:border-neutral-400 transition-all flex flex-col justify-between space-y-3 group shadow-xs"
                                         >
                                             <div className="space-y-3">
+                                                {/* 추천 멘트 영역 (추천 탭이고 멘트가 존재하는 경우 최상단 표시) */}
+                                                {selectedCategory === '추천' && !searchQuery && app.featuredMessage && (
+                                                    <div className="bg-neutral-50 border border-neutral-200/60 rounded-xl p-3 text-xs text-neutral-800 font-medium leading-relaxed italic">
+                                                        "{app.featuredMessage}"
+                                                    </div>
+                                                )}
+
                                                 <div className="flex items-start space-x-3">
                                                     <img
                                                         src={app.iconUrl}
@@ -971,6 +1109,16 @@
                                         검수 대기 ({pendingApps.length})
                                     </button>
                                     <button
+                                        onClick={() => setAdminSubTab('featured')}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                                            adminSubTab === 'featured'
+                                                ? 'bg-neutral-900 text-white'
+                                                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                                        }`}
+                                    >
+                                        추천 관리 ({featuredList.length})
+                                    </button>
+                                    <button
                                         onClick={() => setAdminSubTab('all')}
                                         className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
                                             adminSubTab === 'all'
@@ -1022,7 +1170,13 @@
                                                 {app.screenshots && app.screenshots.length > 0 && (
                                                     <div className="flex space-x-2 overflow-x-auto no-scrollbar py-1">
                                                         {app.screenshots.map((img, idx) => (
-                                                            <img key={idx} src={img} className="h-24 rounded-lg object-cover border border-neutral-200" />
+                                                            <img 
+                                                                key={idx} 
+                                                                src={img} 
+                                                                onClick={() => setPreviewImage(img)}
+                                                                className="h-24 rounded-lg object-cover border border-neutral-200 cursor-pointer hover:opacity-90 transition-opacity" 
+                                                                alt={`스크린샷 ${idx + 1}`}
+                                                            />
                                                         ))}
                                                     </div>
                                                 )}
@@ -1057,7 +1211,103 @@
                                 )
                             )}
 
-                            {/* (2) 전체 웹앱 목록 (삭제/상태 관리) */}
+                            {/* (2) 추천 관리 (approved 전용) */}
+                            {adminSubTab === 'featured' && (
+                                approvedAppsList.length === 0 ? (
+                                    <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
+                                        <p className="text-neutral-400 text-xs">승인된 웹앱이 없습니다. 승인 후 추천등록이 가능합니다.</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        <p className="text-xs text-neutral-500 mb-2">
+                                            승인된 앱 중 스토어 상단 '추천' 탭에 올릴 앱과 멘트를 설정할 수 있습니다.
+                                        </p>
+
+                                        {approvedAppsList.map((app) => {
+                                            const featuredItem = featuredList.find(f => f.appId === app.id);
+                                            const isFeatured = !!featuredItem;
+
+                                            return (
+                                                <div key={app.id} className="bg-white border border-neutral-200/80 rounded-xl p-3.5 space-y-2 shadow-xs">
+                                                    <div className="flex items-center justify-between gap-4">
+                                                        <div className="flex items-center space-x-3 min-w-0">
+                                                            <img
+                                                                src={app.iconUrl}
+                                                                className="w-10 h-10 rounded-xl object-cover border border-neutral-100 flex-shrink-0"
+                                                            />
+                                                            <div className="min-w-0">
+                                                                <div className="flex items-center space-x-2">
+                                                                    <h3 className="font-bold text-xs text-neutral-900 truncate">{app.name}</h3>
+                                                                    <span className="text-[10px] text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
+                                                                        {app.category}
+                                                                    </span>
+                                                                    {isFeatured && (
+                                                                        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                                                                            추천 중 (순서: {featuredItem.order})
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <p className="text-[11px] text-neutral-500 truncate mt-0.5">{app.shortDescription}</p>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="flex items-center space-x-1.5 flex-shrink-0">
+                                                            {isFeatured ? (
+                                                                <>
+                                                                    {/* 순서 조정 버튼 */}
+                                                                    <button
+                                                                        onClick={() => handleMoveFeaturedOrder(app.id, 'up')}
+                                                                        className="w-7 h-7 border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 flex items-center justify-center text-xs"
+                                                                        title="순서 위로"
+                                                                    >
+                                                                        <i className="fas fa-chevron-up text-[10px]"></i>
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => handleMoveFeaturedOrder(app.id, 'down')}
+                                                                        className="w-7 h-7 border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 flex items-center justify-center text-xs"
+                                                                        title="순서 아래로"
+                                                                    >
+                                                                        <i className="fas fa-chevron-down text-[10px]"></i>
+                                                                    </button>
+
+                                                                    <button
+                                                                        onClick={() => openFeaturedModal(app)}
+                                                                        className="px-2.5 py-1 text-xs border border-neutral-300 text-neutral-700 rounded-lg hover:bg-neutral-50 font-medium"
+                                                                    >
+                                                                        멘트 수정
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => handleRemoveFeatured(app.id)}
+                                                                        className="px-2.5 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50 font-medium"
+                                                                    >
+                                                                        추천 제거
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={() => openFeaturedModal(app)}
+                                                                    className="px-3 py-1 text-xs bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 font-semibold"
+                                                                >
+                                                                    추천 추가
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* 현재 작성된 추천 멘트 프리뷰 */}
+                                                    {isFeatured && featuredItem.message && (
+                                                        <div className="bg-neutral-50 border border-neutral-100 p-2 rounded-lg text-xs text-neutral-600">
+                                                            멘트: "{featuredItem.message}"
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )
+                            )}
+
+                            {/* (3) 전체 웹앱 목록 (삭제/상태 관리) */}
                             {adminSubTab === 'all' && (
                                 apps.length === 0 ? (
                                     <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
@@ -1121,6 +1371,49 @@
                                 )
                             )}
                         </main>
+                    )}
+
+                    {/* 추천 멘트 작성/수정 모달 */}
+                    {featuredModalApp && (
+                        <div className="fixed inset-0 z-50 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-xl border border-neutral-100 space-y-3">
+                                <h3 className="text-sm font-bold text-neutral-900">
+                                    추천 멘트 작성 ({featuredModalApp.name})
+                                </h3>
+                                <p className="text-xs text-neutral-400">
+                                    추천 탭 카드 상단에 노출될 멘트를 작성하세요. (없을 경우 멘트 영역이 숨겨집니다)
+                                </p>
+
+                                <form onSubmit={handleSaveFeatured} className="space-y-3">
+                                    <textarea
+                                        rows="3"
+                                        value={featuredMessageInput}
+                                        onChange={(e) => setFeaturedMessageInput(e.target.value)}
+                                        placeholder="예: 공부할 때 특히 유용한 앱입니다."
+                                        className="w-full p-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-xs outline-none focus:bg-white focus:border-neutral-400"
+                                    ></textarea>
+
+                                    <div className="flex justify-end space-x-2 pt-1">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setFeaturedModalApp(null);
+                                                setFeaturedMessageInput('');
+                                            }}
+                                            className="px-3 py-1.5 border border-neutral-200 text-neutral-600 text-xs rounded-xl"
+                                        >
+                                            취소
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="px-4 py-1.5 bg-neutral-900 text-white text-xs font-semibold rounded-xl hover:bg-neutral-800"
+                                        >
+                                            추천하기
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
                     )}
 
                     {/* 내 계정 정보 모달 */}
@@ -1226,13 +1519,18 @@
 
                                 {selectedApp.screenshots && selectedApp.screenshots.length > 0 && (
                                     <div className="space-y-1.5">
-                                        <p className="text-xs font-semibold text-neutral-700">스크린샷 미리보기</p>
+                                        <div className="flex items-center justify-between">
+                                            <p className="text-xs font-semibold text-neutral-700">스크린샷 미리보기</p>
+                                            <span className="text-[10px] text-neutral-400">클릭하여 확대</span>
+                                        </div>
                                         <div className="flex space-x-2 overflow-x-auto no-scrollbar py-1">
                                             {selectedApp.screenshots.map((s, idx) => (
                                                 <img
                                                     key={idx}
                                                     src={s}
-                                                    className="h-44 object-cover rounded-xl border border-neutral-200 flex-shrink-0"
+                                                    onClick={() => setPreviewImage(s)}
+                                                    className="h-44 object-cover rounded-xl border border-neutral-200 flex-shrink-0 cursor-pointer hover:opacity-90 transition-opacity"
+                                                    alt={`스크린샷 ${idx + 1}`}
                                                 />
                                             ))}
                                         </div>
@@ -1271,6 +1569,29 @@
                         </div>
                     )}
 
+                    {/* 스크린샷 확대 라이트박스 모달 */}
+                    {previewImage && (
+                        <div 
+                            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 cursor-pointer animate-in fade-in duration-150"
+                            onClick={() => setPreviewImage(null)}
+                        >
+                            <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center justify-center" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                    onClick={() => setPreviewImage(null)}
+                                    className="absolute -top-10 right-0 text-white hover:text-neutral-300 text-xs bg-neutral-800/80 hover:bg-neutral-800 px-3 py-1.5 rounded-lg transition-colors flex items-center space-x-1.5"
+                                >
+                                    <i className="fas fa-times"></i>
+                                    <span>닫기</span>
+                                </button>
+                                <img
+                                    src={previewImage}
+                                    alt="확대된 스크린샷"
+                                    className="max-w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl border border-neutral-700/50"
+                                />
+                            </div>
+                        </div>
+                    )}
+
                     {/* 웹앱 등록 신청 모달 */}
                     {isRegisterOpen && (
                         <div className="fixed inset-0 z-50 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
@@ -1305,7 +1626,7 @@
                                         <div>
                                             <label className="block font-semibold text-neutral-700 mb-1">카테고리 *</label>
                                             <select name="category" className="w-full px-3 py-2 bg-neutral-50 border border-neutral-200 rounded-xl outline-none focus:bg-white">
-                                                {CATEGORIES.filter(c => c !== '전체').map(cat => (
+                                                {CATEGORIES.filter(c => c !== '추천').map(cat => (
                                                     <option key={cat} value={cat}>{cat}</option>
                                                 ))}
                                             </select>
