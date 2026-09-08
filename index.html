@@ -137,7 +137,6 @@
             });
         };
 
-        // '전체' 탭 제거, '추천' 탭 추가
         const CATEGORIES = ['추천', '생산성', '공부', '디자인', '개발', '게임', '음악', '금융', '생활', 'AI', '기타'];
 
         function Toast({ message, type, onClose }) {
@@ -165,7 +164,7 @@
             const [searchQuery, setSearchQuery] = useState('');
             const [activeTab, setActiveTab] = useState('home'); // 'home' | 'my_apps' | 'admin'
             const [selectedApp, setSelectedApp] = useState(null);
-            const [previewImage, setPreviewImage] = useState(null); // 스크린샷 크게 보기용
+            const [previewImage, setPreviewImage] = useState(null);
             const [isRegisterOpen, setIsRegisterOpen] = useState(false);
             
             const [rejectionModalApp, setRejectionModalApp] = useState(null);
@@ -259,11 +258,9 @@
                     const firebaseUser = auth.currentUser;
 
                     try {
-                        // 1. Firestore users/{uid} 문서 삭제
                         const userRef = doc(db, "users", currentUser.uid);
                         await deleteDoc(userRef);
 
-                        // 2. Firebase Auth 사용자 계정 삭제 (apps 문서는 유지됨)
                         if (firebaseUser) {
                             await deleteUser(firebaseUser);
                         }
@@ -301,7 +298,6 @@
                                     userData = userSnap.data();
                                     userRole = userData.role || "user";
                                 } else {
-                                    // 신규 사용자 문서 자동 생성 (users/{uid})
                                     const newUserDoc = {
                                         uid: user.uid,
                                         role: "user",
@@ -333,7 +329,7 @@
                 }
             }, []);
 
-            // 2. Security Rules에 정렬된 조건별 Firestore 앱 쿼리 구독 & featuredApps 구독
+            // 2. Firestore 앱 쿼리 구독 & featuredApps 구독
             useEffect(() => {
                 if (!window.FB_MODULE || !window.FB_MODULE.db) {
                     setApps([]);
@@ -344,7 +340,7 @@
                 const { db, collection, query, where, onSnapshot } = window.FB_MODULE;
                 const unsubs = [];
 
-                // (1) 승인된 앱 (status == "approved") - 누구나 읽기 가능
+                // (1) 승인된 앱 (status == "approved")
                 try {
                     const approvedQuery = query(collection(db, 'apps'), where("status", "==", "approved"));
                     const unsubApproved = onSnapshot(approvedQuery, (snapshot) => {
@@ -361,7 +357,7 @@
                     console.error("Approved apps query 설정 실패:", err);
                 }
 
-                // (2) 관리자 추천 데이터 (featuredApps) - active == true, order 오름차순
+                // (2) 관리자 추천 데이터 (featuredApps) - active == true
                 try {
                     const featuredQuery = query(collection(db, 'featuredApps'), where("active", "==", true));
                     const unsubFeatured = onSnapshot(featuredQuery, (snapshot) => {
@@ -379,7 +375,7 @@
                     console.error("Featured apps query 설정 실패:", err);
                 }
 
-                // (3) 내 앱 (developerId == currentUser.uid) - 로그인 상태에서만 실행
+                // (3) 내 앱 (developerId == currentUser.uid)
                 if (currentUser.uid) {
                     try {
                         const myAppsQuery = query(collection(db, 'apps'), where("developerId", "==", currentUser.uid));
@@ -400,7 +396,7 @@
                     setMyAppsList([]);
                 }
 
-                // (4) 관리자용 심사 대기 앱 (status == "pending") - admin 권한 확인 시에만 실행
+                // (4) 관리자용 심사 대기 앱 (status == "pending")
                 if (currentUser.role === 'admin') {
                     try {
                         const pendingQuery = query(collection(db, 'apps'), where("status", "==", "pending"));
@@ -426,7 +422,7 @@
                 };
             }, [currentUser.uid, currentUser.role]);
 
-            // 3. 개별 쿼리 결과를 고유 id 기준 Map으로 중복 제거 및 단일 apps 상태로 병합
+            // 3. 고유 id 기준 Map으로 중복 제거 및 단일 apps 상태로 병합
             useEffect(() => {
                 const combinedAppsMap = new Map();
 
@@ -482,7 +478,7 @@
                 setUploadedScreenshots(prev => prev.filter((_, i) => i !== index));
             };
 
-            // 웹앱 신규 등록 신청 (Firestore 저장)
+            // 웹앱 신규 등록 신청
             const handleRegisterSubmit = async (e) => {
                 e.preventDefault();
                 if (!currentUser.uid) {
@@ -554,19 +550,15 @@
                         showToast(newStatus === 'approved' ? "웹앱이 승인되었습니다." : "신청이 거절 처리되었습니다.");
                     } catch (err) {
                         console.error("상태 업데이트 실패:", err);
-                        setApps(prev => prev.map(a => a.id === targetAppId ? { ...a, status: newStatus, rejectionReason: reason } : a));
-                        showToast("상태가 변경되었습니다.");
+                        showToast("상태 변경 실패", "error");
                     }
-                } else {
-                    setApps(prev => prev.map(a => a.id === targetAppId ? { ...a, status: newStatus, rejectionReason: reason } : a));
-                    showToast("상태가 변경되었습니다.");
                 }
 
                 setRejectionModalApp(null);
                 setRejectionReason('');
             };
 
-            // 웹앱 삭제 함수 (관리자 또는 본인 등록 웹앱)
+            // 웹앱 삭제 함수 (apps 문서 삭제)
             const handleDeleteApp = async (appId) => {
                 const targetApp = apps.find(a => a.id === appId);
                 const isOwner = targetApp && targetApp.developerId === currentUser.uid;
@@ -588,7 +580,7 @@
                         try {
                             await deleteDoc(doc(db, 'featuredApps', appId));
                         } catch (e) {
-                            // ignore if not featured
+                            // ignore
                         }
 
                         showToast("웹앱이 성공적으로 삭제되었습니다.");
@@ -596,9 +588,6 @@
                         console.error("앱 삭제 실패:", err);
                         showToast("삭제 실패: 권한 또는 네트워크 상태를 확인하세요.", "error");
                     }
-                } else {
-                    setApps(prev => prev.filter(a => a.id !== appId));
-                    showToast("웹앱이 삭제되었습니다.");
                 }
 
                 setDeleteAppTarget(null);
@@ -608,13 +597,19 @@
             };
 
             // --- 추천 시스템 관련 비즈니스 로직 ---
+            // 헬퍼: 특정 앱의 추천 정보 찾기 (appId 기준)
+            const getFeaturedData = (appId) => {
+                if (!appId) return null;
+                return featuredList.find(f => f.appId === appId || f.id === appId) || null;
+            };
+
             // 추천 등록 / 멘트 수정 저장
             const handleSaveFeatured = async (e) => {
                 e.preventDefault();
                 if (!featuredModalApp) return;
                 const appId = featuredModalApp.id;
 
-                const existingFeat = featuredList.find(f => f.appId === appId);
+                const existingFeat = getFeaturedData(appId);
                 const maxOrder = featuredList.length > 0 ? Math.max(...featuredList.map(f => Number(f.order) || 0)) : 0;
                 const orderNum = existingFeat ? existingFeat.order : (maxOrder + 1);
 
@@ -641,23 +636,28 @@
                 setFeaturedMessageInput('');
             };
 
-            // 추천 제거 (featuredApps에서 삭제)
+            // 추천 해제 (featuredApps에서만 삭제, 앱은 삭제되지 않음)
             const handleRemoveFeatured = async (appId) => {
+                if (currentUser.role !== 'admin') {
+                    showToast("관리자 권한이 필요합니다.", "error");
+                    return;
+                }
+
                 if (window.FB_MODULE && window.FB_MODULE.db) {
                     try {
                         const { db, doc, deleteDoc } = window.FB_MODULE;
                         await deleteDoc(doc(db, 'featuredApps', appId));
-                        showToast("추천에서 제거되었습니다.");
+                        showToast("추천에서 해제되었습니다.");
                     } catch (err) {
-                        console.error("추천 제거 에러:", err);
-                        showToast("추천 제거 실패", "error");
+                        console.error("추천 해제 에러:", err);
+                        showToast("추천 해제 실패", "error");
                     }
                 }
             };
 
             // 추천 순서 변경 (위/아래)
             const handleMoveFeaturedOrder = async (appId, direction) => {
-                const currentIndex = featuredList.findIndex(f => f.appId === appId);
+                const currentIndex = featuredList.findIndex(f => (f.appId === appId || f.id === appId));
                 if (currentIndex === -1) return;
                 const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
                 if (targetIndex < 0 || targetIndex >= featuredList.length) return;
@@ -665,11 +665,14 @@
                 const currentFeat = featuredList[currentIndex];
                 const targetFeat = featuredList[targetIndex];
 
+                const currentDocId = currentFeat.id || currentFeat.appId;
+                const targetDocId = targetFeat.id || targetFeat.appId;
+
                 if (window.FB_MODULE && window.FB_MODULE.db) {
                     try {
                         const { db, doc, updateDoc } = window.FB_MODULE;
-                        await updateDoc(doc(db, 'featuredApps', currentFeat.appId), { order: targetFeat.order });
-                        await updateDoc(doc(db, 'featuredApps', targetFeat.appId), { order: currentFeat.order });
+                        await updateDoc(doc(db, 'featuredApps', currentDocId), { order: targetFeat.order });
+                        await updateDoc(doc(db, 'featuredApps', targetDocId), { order: currentFeat.order });
                         showToast("추천 순서가 변경되었습니다.");
                     } catch (err) {
                         console.error("순서 변경 실패:", err);
@@ -679,7 +682,11 @@
 
             // 추천 모달 열기 함수
             const openFeaturedModal = (app) => {
-                const existing = featuredList.find(f => f.appId === app.id);
+                if (app.status !== 'approved') {
+                    showToast("승인된 웹앱만 추천할 수 있습니다.", "error");
+                    return;
+                }
+                const existing = getFeaturedData(app.id);
                 setFeaturedModalApp(app);
                 setFeaturedMessageInput(existing ? existing.message || '' : '');
             };
@@ -695,11 +702,11 @@
                     });
                 }
 
-                // 2. '추천' 탭 선택 시
+                // 2. '추천' 탭 선택 시 (featuredApps에 연결된 승인된 앱만 order 순 정렬)
                 if (selectedCategory === '추천') {
                     const featuredAppsMapped = [];
                     featuredList.forEach(feat => {
-                        const matchedApp = approvedAppsList.find(a => a.id === feat.appId && a.status === 'approved');
+                        const matchedApp = approvedAppsList.find(a => (a.id === feat.appId || a.id === feat.id) && a.status === 'approved');
                         if (matchedApp) {
                             featuredAppsMapped.push({
                                 ...matchedApp,
@@ -751,7 +758,6 @@
                             </div>
 
                             <div className="flex items-center space-x-2">
-                                {/* 로그인 전 [로그인] 버튼 vs 로그인 후 [계정] 드롭다운 버튼 */}
                                 {!currentUser.uid ? (
                                     <button
                                         onClick={handleGoogleLogin}
@@ -784,7 +790,6 @@
                                             <i className={`fas fa-chevron-down text-[10px] text-neutral-400 transition-transform ${isAccountMenuOpen ? 'rotate-180' : ''}`}></i>
                                         </button>
 
-                                        {/* 계정 드롭다운 메뉴 */}
                                         {isAccountMenuOpen && (
                                             <div className="absolute right-0 mt-2 w-48 bg-white border border-neutral-200 rounded-xl shadow-xl py-1 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
                                                 <div className="px-3 py-2 border-b border-neutral-100">
@@ -950,59 +955,97 @@
                                 </div>
                             ) : (
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                    {displayHomeApps.map((app) => (
-                                        <div
-                                            key={app.id}
-                                            onClick={() => setSelectedApp(app)}
-                                            className="bg-white border border-neutral-200/80 rounded-2xl p-4 cursor-pointer hover:border-neutral-400 transition-all flex flex-col justify-between space-y-3 group shadow-xs"
-                                        >
-                                            <div className="space-y-3">
-                                                {/* 추천 멘트 영역 (추천 탭이고 멘트가 존재하는 경우 최상단 표시) */}
-                                                {selectedCategory === '추천' && !searchQuery && app.featuredMessage && (
-                                                    <div className="bg-neutral-50 border border-neutral-200/60 rounded-xl p-3 text-xs text-neutral-800 font-medium leading-relaxed italic">
-                                                        "{app.featuredMessage}"
-                                                    </div>
-                                                )}
+                                    {displayHomeApps.map((app) => {
+                                        const feat = getFeaturedData(app.id);
+                                        const isFeatured = !!feat;
 
-                                                <div className="flex items-start space-x-3">
-                                                    <img
-                                                        src={app.iconUrl}
-                                                        alt={app.name}
-                                                        className="w-12 h-12 rounded-xl object-cover bg-neutral-100 border border-neutral-100 flex-shrink-0"
-                                                        onError={(e) => { e.target.src = 'https://via.placeholder.com/150?text=App'; }}
-                                                    />
-                                                    <div className="min-w-0 flex-1">
-                                                        <div className="flex items-center justify-between">
-                                                            <h3 className="font-bold text-neutral-900 text-sm truncate group-hover:text-neutral-600 transition-colors">
-                                                                {app.name}
-                                                            </h3>
-                                                            <span className="text-[10px] text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
-                                                                {app.category}
-                                                            </span>
+                                        return (
+                                            <div
+                                                key={app.id}
+                                                onClick={() => setSelectedApp(app)}
+                                                className="bg-white border border-neutral-200/80 rounded-2xl p-4 cursor-pointer hover:border-neutral-400 transition-all flex flex-col justify-between space-y-3 group shadow-xs"
+                                            >
+                                                <div className="space-y-3">
+                                                    {/* 추천 탭이고 멘트가 존재하는 경우 최상단 표시 */}
+                                                    {selectedCategory === '추천' && !searchQuery && app.featuredMessage && (
+                                                        <div className="bg-neutral-50 border border-neutral-200/60 rounded-xl p-3 text-xs text-neutral-800 font-medium leading-relaxed italic">
+                                                            "{app.featuredMessage}"
                                                         </div>
-                                                        <p className="text-[11px] text-neutral-400 truncate mt-0.5">{app.developer}</p>
+                                                    )}
+
+                                                    <div className="flex items-start space-x-3">
+                                                        <img
+                                                            src={app.iconUrl}
+                                                            alt={app.name}
+                                                            className="w-12 h-12 rounded-xl object-cover bg-neutral-100 border border-neutral-100 flex-shrink-0"
+                                                            onError={(e) => { e.target.src = 'https://via.placeholder.com/150?text=App'; }}
+                                                        />
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="flex items-center justify-between">
+                                                                <h3 className="font-bold text-neutral-900 text-sm truncate group-hover:text-neutral-600 transition-colors">
+                                                                    {app.name}
+                                                                </h3>
+                                                                <span className="text-[10px] text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
+                                                                    {app.category}
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-[11px] text-neutral-400 truncate mt-0.5">{app.developer}</p>
+                                                        </div>
                                                     </div>
+
+                                                    <p className="text-neutral-600 text-xs line-clamp-2 leading-relaxed">
+                                                        {app.shortDescription}
+                                                    </p>
                                                 </div>
 
-                                                <p className="text-neutral-600 text-xs line-clamp-2 leading-relaxed">
-                                                    {app.shortDescription}
-                                                </p>
-                                            </div>
+                                                <div className="pt-2.5 flex items-center justify-between border-t border-neutral-100 text-xs font-semibold gap-2">
+                                                    {/* 관리자 전용 추천 조작 버튼 (승인된 앱 전용) */}
+                                                    {currentUser.role === 'admin' && app.status === 'approved' ? (
+                                                        <div className="flex items-center space-x-1" onClick={(e) => e.stopPropagation()}>
+                                                            {isFeatured ? (
+                                                                <>
+                                                                    <button
+                                                                        onClick={() => openFeaturedModal(app)}
+                                                                        className="px-2 py-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-[11px] rounded-md transition-colors"
+                                                                        title="추천 멘트 수정"
+                                                                    >
+                                                                        멘트 수정
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => handleRemoveFeatured(app.id)}
+                                                                        className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200/80 text-[11px] rounded-md transition-colors"
+                                                                        title="추천 해제"
+                                                                    >
+                                                                        추천 해제
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={() => openFeaturedModal(app)}
+                                                                    className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200/80 text-[11px] rounded-md transition-colors flex items-center space-x-1"
+                                                                >
+                                                                    <i className="fas fa-plus text-[9px]"></i>
+                                                                    <span>추천하기</span>
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="text-neutral-400 text-[11px] font-normal">PWA Web</span>
+                                                    )}
 
-                                            <div className="pt-2 flex items-center justify-between border-t border-neutral-100 text-xs font-semibold">
-                                                <span className="text-neutral-400 text-[11px] font-normal">PWA Web</span>
-                                                <a
-                                                    href={app.url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className="px-3 py-1 bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg text-xs transition-colors"
-                                                >
-                                                    실행하기
-                                                </a>
+                                                    <a
+                                                        href={app.url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        className="px-3 py-1 bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg text-xs transition-colors flex-shrink-0"
+                                                    >
+                                                        실행하기
+                                                    </a>
+                                                </div>
                                             </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </main>
@@ -1075,7 +1118,6 @@
                                                     상세
                                                 </button>
 
-                                                {/* 본인 소유 웹앱 삭제 버튼 */}
                                                 {(app.developerId === currentUser.uid || currentUser.role === 'admin') && (
                                                     <button
                                                         onClick={() => setDeleteAppTarget(app)}
@@ -1211,93 +1253,95 @@
                                 )
                             )}
 
-                            {/* (2) 추천 관리 (approved 전용) */}
+                            {/* (2) 추천 관리 (현재 추천 중인 앱들만 나열) */}
                             {adminSubTab === 'featured' && (
-                                approvedAppsList.length === 0 ? (
+                                featuredList.length === 0 ? (
                                     <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
-                                        <p className="text-neutral-400 text-xs">승인된 웹앱이 없습니다. 승인 후 추천등록이 가능합니다.</p>
+                                        <p className="text-neutral-500 text-xs mb-2">현재 추천 중인 웹앱이 없습니다.</p>
+                                        <p className="text-neutral-400 text-[11px]">
+                                            스토어나 검색창에서 추천할 앱을 찾아 카드 또는 상세 화면에서 바로 추천할 수 있습니다.
+                                        </p>
                                     </div>
                                 ) : (
                                     <div className="space-y-3">
-                                        <p className="text-xs text-neutral-500 mb-2">
-                                            승인된 앱 중 스토어 상단 '추천' 탭에 올릴 앱과 멘트를 설정할 수 있습니다.
-                                        </p>
+                                        <div className="flex items-center justify-between text-xs text-neutral-500 mb-1">
+                                            <span>현재 추천 중인 웹앱 목록입니다. (순서 및 멘트 수정/추천 해제 지원)</span>
+                                            <span className="font-semibold text-neutral-800">총 {featuredList.length}개</span>
+                                        </div>
 
-                                        {approvedAppsList.map((app) => {
-                                            const featuredItem = featuredList.find(f => f.appId === app.id);
-                                            const isFeatured = !!featuredItem;
+                                        {featuredList.map((featuredItem, idx) => {
+                                            const matchedApp = approvedAppsList.find(a => a.id === featuredItem.appId || a.id === featuredItem.id);
 
                                             return (
-                                                <div key={app.id} className="bg-white border border-neutral-200/80 rounded-xl p-3.5 space-y-2 shadow-xs">
+                                                <div key={featuredItem.id || featuredItem.appId} className="bg-white border border-neutral-200/80 rounded-xl p-3.5 space-y-2 shadow-xs">
                                                     <div className="flex items-center justify-between gap-4">
                                                         <div className="flex items-center space-x-3 min-w-0">
-                                                            <img
-                                                                src={app.iconUrl}
-                                                                className="w-10 h-10 rounded-xl object-cover border border-neutral-100 flex-shrink-0"
-                                                            />
+                                                            <div className="w-6 h-6 rounded-full bg-neutral-100 text-neutral-700 text-[11px] font-bold flex items-center justify-center flex-shrink-0">
+                                                                {idx + 1}
+                                                            </div>
+                                                            {matchedApp && (
+                                                                <img
+                                                                    src={matchedApp.iconUrl}
+                                                                    className="w-10 h-10 rounded-xl object-cover border border-neutral-100 flex-shrink-0"
+                                                                />
+                                                            )}
                                                             <div className="min-w-0">
                                                                 <div className="flex items-center space-x-2">
-                                                                    <h3 className="font-bold text-xs text-neutral-900 truncate">{app.name}</h3>
-                                                                    <span className="text-[10px] text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
-                                                                        {app.category}
-                                                                    </span>
-                                                                    {isFeatured && (
-                                                                        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
-                                                                            추천 중 (순서: {featuredItem.order})
+                                                                    <h3 className="font-bold text-xs text-neutral-900 truncate">
+                                                                        {matchedApp ? matchedApp.name : `앱 ID: ${featuredItem.appId}`}
+                                                                    </h3>
+                                                                    {matchedApp && (
+                                                                        <span className="text-[10px] text-neutral-400 bg-neutral-100 px-1.5 py-0.5 rounded">
+                                                                            {matchedApp.category}
                                                                         </span>
                                                                     )}
                                                                 </div>
-                                                                <p className="text-[11px] text-neutral-500 truncate mt-0.5">{app.shortDescription}</p>
+                                                                <p className="text-[11px] text-neutral-500 truncate mt-0.5">
+                                                                    {matchedApp ? matchedApp.shortDescription : '상세 정보를 불러올 수 없음'}
+                                                                </p>
                                                             </div>
                                                         </div>
 
                                                         <div className="flex items-center space-x-1.5 flex-shrink-0">
-                                                            {isFeatured ? (
-                                                                <>
-                                                                    {/* 순서 조정 버튼 */}
-                                                                    <button
-                                                                        onClick={() => handleMoveFeaturedOrder(app.id, 'up')}
-                                                                        className="w-7 h-7 border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 flex items-center justify-center text-xs"
-                                                                        title="순서 위로"
-                                                                    >
-                                                                        <i className="fas fa-chevron-up text-[10px]"></i>
-                                                                    </button>
-                                                                    <button
-                                                                        onClick={() => handleMoveFeaturedOrder(app.id, 'down')}
-                                                                        className="w-7 h-7 border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 flex items-center justify-center text-xs"
-                                                                        title="순서 아래로"
-                                                                    >
-                                                                        <i className="fas fa-chevron-down text-[10px]"></i>
-                                                                    </button>
+                                                            {/* 추천 순서 조정 */}
+                                                            <button
+                                                                onClick={() => handleMoveFeaturedOrder(featuredItem.appId || featuredItem.id, 'up')}
+                                                                disabled={idx === 0}
+                                                                className="w-7 h-7 border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 disabled:opacity-30 disabled:hover:bg-white flex items-center justify-center text-xs"
+                                                                title="순서 위로"
+                                                            >
+                                                                <i className="fas fa-chevron-up text-[10px]"></i>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleMoveFeaturedOrder(featuredItem.appId || featuredItem.id, 'down')}
+                                                                disabled={idx === featuredList.length - 1}
+                                                                className="w-7 h-7 border border-neutral-200 text-neutral-600 rounded-lg hover:bg-neutral-50 disabled:opacity-30 disabled:hover:bg-white flex items-center justify-center text-xs"
+                                                                title="순서 아래로"
+                                                            >
+                                                                <i className="fas fa-chevron-down text-[10px]"></i>
+                                                            </button>
 
-                                                                    <button
-                                                                        onClick={() => openFeaturedModal(app)}
-                                                                        className="px-2.5 py-1 text-xs border border-neutral-300 text-neutral-700 rounded-lg hover:bg-neutral-50 font-medium"
-                                                                    >
-                                                                        멘트 수정
-                                                                    </button>
-                                                                    <button
-                                                                        onClick={() => handleRemoveFeatured(app.id)}
-                                                                        className="px-2.5 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50 font-medium"
-                                                                    >
-                                                                        추천 제거
-                                                                    </button>
-                                                                </>
-                                                            ) : (
+                                                            {matchedApp && (
                                                                 <button
-                                                                    onClick={() => openFeaturedModal(app)}
-                                                                    className="px-3 py-1 text-xs bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 font-semibold"
+                                                                    onClick={() => openFeaturedModal(matchedApp)}
+                                                                    className="px-2.5 py-1 text-xs border border-neutral-300 text-neutral-700 rounded-lg hover:bg-neutral-50 font-medium"
                                                                 >
-                                                                    추천 추가
+                                                                    멘트 수정
                                                                 </button>
                                                             )}
+                                                            <button
+                                                                onClick={() => handleRemoveFeatured(featuredItem.appId || featuredItem.id)}
+                                                                className="px-2.5 py-1 text-xs border border-rose-200 text-rose-600 rounded-lg hover:bg-rose-50 font-medium"
+                                                            >
+                                                                추천 해제
+                                                            </button>
                                                         </div>
                                                     </div>
 
-                                                    {/* 현재 작성된 추천 멘트 프리뷰 */}
-                                                    {isFeatured && featuredItem.message && (
-                                                        <div className="bg-neutral-50 border border-neutral-100 p-2 rounded-lg text-xs text-neutral-600">
-                                                            멘트: "{featuredItem.message}"
+                                                    {/* 작성된 추천 멘트 프리뷰 */}
+                                                    {featuredItem.message && (
+                                                        <div className="bg-neutral-50 border border-neutral-100 p-2.5 rounded-lg text-xs text-neutral-700 italic">
+                                                            "{featuredItem.message}"
                                                         </div>
                                                     )}
                                                 </div>
@@ -1307,7 +1351,7 @@
                                 )
                             )}
 
-                            {/* (3) 전체 웹앱 목록 (삭제/상태 관리) */}
+                            {/* (3) 전체 웹앱 목록 */}
                             {adminSubTab === 'all' && (
                                 apps.length === 0 ? (
                                     <div className="bg-white rounded-2xl p-12 text-center border border-neutral-200">
@@ -1381,7 +1425,7 @@
                                     추천 멘트 작성 ({featuredModalApp.name})
                                 </h3>
                                 <p className="text-xs text-neutral-400">
-                                    추천 탭 카드 상단에 노출될 멘트를 작성하세요. (없을 경우 멘트 영역이 숨겨집니다)
+                                    추천 탭 카드 상단에 노출될 멘트를 작성하세요. (비워둘 수 있으며 비워두면 멘트가 노출되지 않습니다)
                                 </p>
 
                                 <form onSubmit={handleSaveFeatured} className="space-y-3">
@@ -1544,26 +1588,58 @@
                                     </p>
                                 </div>
 
-                                <div className="pt-2 flex items-center space-x-2">
-                                    {/* 관리자 또는 등록 본인일 경우 모달에서도 삭제 버튼 표시 */}
-                                    {(currentUser.role === 'admin' || (currentUser.uid && selectedApp.developerId === currentUser.uid)) && (
-                                        <button
-                                            onClick={() => setDeleteAppTarget(selectedApp)}
-                                            className="w-1/3 py-2.5 border border-rose-200 hover:bg-rose-50 text-rose-600 font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition-colors"
-                                        >
-                                            <i className="fas fa-trash-alt text-[10px]"></i>
-                                            <span>삭제</span>
-                                        </button>
+                                {/* 상세 모달 하단 버튼 영역 */}
+                                <div className="pt-2 flex flex-col space-y-2">
+                                    {/* 관리자 전용 추천 조작 버튼 */}
+                                    {currentUser.role === 'admin' && selectedApp.status === 'approved' && (
+                                        <div className="flex items-center space-x-2 pt-2 border-t border-neutral-100">
+                                            {getFeaturedData(selectedApp.id) ? (
+                                                <>
+                                                    <button
+                                                        onClick={() => openFeaturedModal(selectedApp)}
+                                                        className="w-1/2 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-800 text-xs font-semibold rounded-xl transition-colors"
+                                                    >
+                                                        추천 멘트 수정
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleRemoveFeatured(selectedApp.id)}
+                                                        className="w-1/2 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-semibold rounded-xl transition-colors"
+                                                    >
+                                                        추천 해제
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <button
+                                                    onClick={() => openFeaturedModal(selectedApp)}
+                                                    className="w-full py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-semibold rounded-xl transition-colors flex items-center justify-center space-x-1.5"
+                                                >
+                                                    <i className="fas fa-plus text-[10px]"></i>
+                                                    <span>추천 앱으로 등록하기</span>
+                                                </button>
+                                            )}
+                                        </div>
                                     )}
-                                    <a
-                                        href={selectedApp.url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className={`${(currentUser.role === 'admin' || (currentUser.uid && selectedApp.developerId === currentUser.uid)) ? 'w-2/3' : 'w-full'} py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition-colors`}
-                                    >
-                                        <span>웹앱 바로가기</span>
-                                        <i className="fas fa-arrow-up-right-from-square text-[10px]"></i>
-                                    </a>
+
+                                    <div className="flex items-center space-x-2">
+                                        {(currentUser.role === 'admin' || (currentUser.uid && selectedApp.developerId === currentUser.uid)) && (
+                                            <button
+                                                onClick={() => setDeleteAppTarget(selectedApp)}
+                                                className="w-1/3 py-2.5 border border-rose-200 hover:bg-rose-50 text-rose-600 font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition-colors"
+                                            >
+                                                <i className="fas fa-trash-alt text-[10px]"></i>
+                                                <span>앱 삭제</span>
+                                            </button>
+                                        )}
+                                        <a
+                                            href={selectedApp.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className={`${(currentUser.role === 'admin' || (currentUser.uid && selectedApp.developerId === currentUser.uid)) ? 'w-2/3' : 'w-full'} py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-semibold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition-colors`}
+                                        >
+                                            <span>웹앱 바로가기</span>
+                                            <i className="fas fa-arrow-up-right-from-square text-[10px]"></i>
+                                        </a>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1751,7 +1827,7 @@
                         </div>
                     )}
 
-                    {/* 앱 삭제 확인 모달 (관리자 및 일반 등록자 공용) */}
+                    {/* 앱 삭제 확인 모달 */}
                     {deleteAppTarget && (
                         <div className="fixed inset-0 z-50 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center p-4">
                             <div className="bg-white rounded-2xl max-w-xs w-full p-5 shadow-xl border border-neutral-100 space-y-3">
