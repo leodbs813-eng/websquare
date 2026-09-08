@@ -61,8 +61,10 @@
     <!-- Firebase SDK Modular Import -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } 
+        from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc } 
+        from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyDcrBKhvoe17gvdwjAUgXelmHEUWol-_bo",
@@ -85,7 +87,7 @@
 
         window.FB_MODULE = {
             app, db, auth,
-            signInAnonymously, onAuthStateChanged,
+            GoogleAuthProvider, signInWithPopup, onAuthStateChanged,
             doc, getDoc, setDoc, updateDoc, collection, onSnapshot, addDoc, deleteDoc
         };
     </script>
@@ -93,8 +95,7 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo, useRef } = React;
 
-        // 초고율 이미지 압축 헬퍼 (Canvas 기반 규격 정제 및 60% JPEG 압축)
-        // Firestore 1MB 제한 방지를 위해 아이콘은 최대 180px, 스크린샷은 최대 600px로 제한
+        // 초고율 이미지 압축 헬퍼
         const processImageFile = (file, maxDimension = 600, quality = 0.6) => {
             return new Promise((resolve, reject) => {
                 if (!file || !file.type.startsWith('image/')) {
@@ -125,7 +126,6 @@
                         canvas.height = height;
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
-                        // Data URL 압축 생성
                         const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
                         resolve(compressedDataUrl);
                     };
@@ -200,10 +200,12 @@
             const [rejectionReason, setRejectionReason] = useState('');
             const [toast, setToast] = useState(null);
 
-            // 로그인 정보 (익명 로그인 처리)
+            // 로그인 사용자 상태 정보 (초기값 null/user)
             const [currentUser, setCurrentUser] = useState({
-                uid: 'user_local_' + Math.floor(Math.random() * 10000),
-                role: 'user'
+                uid: null,
+                role: 'user',
+                name: '',
+                email: ''
             });
 
             // 업로드 관리
@@ -215,19 +217,60 @@
                 setToast({ message, type });
             };
 
-            // Firebase 실시간 바인딩
+            // Google 로그인 핸들러
+            const handleGoogleLogin = () => {
+                if (window.FB_MODULE && window.FB_MODULE.auth) {
+                    const { auth, GoogleAuthProvider, signInWithPopup } = window.FB_MODULE;
+                    const provider = new GoogleAuthProvider();
+                    signInWithPopup(auth, provider).catch(error => {
+                        console.error("Google 로그인 실패:", error);
+                        showToast("로그인 실패: 다시 시도해주세요.", "error");
+                    });
+                }
+            };
+
+            // Firebase 실시간 바인딩 및 구글 인증 상태 처리
             useEffect(() => {
                 let unsubscribe = null;
                 const checkAndInitFB = async () => {
                     if (window.FB_MODULE && window.FB_MODULE.db) {
-                        const { db, auth, signInAnonymously, onAuthStateChanged, collection, onSnapshot } = window.FB_MODULE;
+                        const { db, auth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, doc, getDoc, setDoc, collection, onSnapshot } = window.FB_MODULE;
 
-                        // 익명 인증 처리
-                        onAuthStateChanged(auth, (user) => {
+                        // Google 로그인 & Firestore 사용자 role 검증
+                        onAuthStateChanged(auth, async (user) => {
                             if (user) {
-                                setCurrentUser(prev => ({ ...prev, uid: user.uid }));
+                                try {
+                                    const userRef = doc(db, "users", user.uid);
+                                    const userSnap = await getDoc(userRef);
+                                    if (userSnap.exists()) {
+                                        const userData = userSnap.data();
+                                        setCurrentUser({
+                                            uid: user.uid,
+                                            role: userData.role || "user",
+                                            name: user.displayName || "사용자",
+                                            email: user.email || ""
+                                        });
+                                    } else {
+                                        // 신규 사용자 등록
+                                        await setDoc(userRef, {
+                                            role: "user",
+                                            name: user.displayName || "",
+                                            email: user.email || "",
+                                            createdAt: new Date().toISOString()
+                                        });
+                                        setCurrentUser({
+                                            uid: user.uid,
+                                            role: "user",
+                                            name: user.displayName || "사용자",
+                                            email: user.email || ""
+                                        });
+                                    }
+                                } catch (error) {
+                                    console.error("사용자 정보 불러오기 실패:", error);
+                                }
                             } else {
-                                signInAnonymously(auth).catch(err => console.log("익명로그인 패스"));
+                                // 로그인되지 않은 상태 처리
+                                setCurrentUser({ uid: null, role: 'user', name: '', email: '' });
                             }
                         });
 
@@ -236,9 +279,8 @@
                             const appsRef = collection(db, 'apps');
                             unsubscribe = onSnapshot(appsRef, (snapshot) => {
                                 const fetched = [];
-                                snapshot.forEach((doc) => {
-                                    // Firestore 고유 Document ID와 데이터를 매핑
-                                    fetched.push({ id: doc.id, ...doc.data() });
+                                snapshot.forEach((docSnap) => {
+                                    fetched.push({ id: docSnap.id, ...docSnap.data() });
                                 });
 
                                 if (fetched.length === 0) {
@@ -266,7 +308,7 @@
                 };
             }, []);
 
-            // 아이콘 업로드 (최대 180px 초고율 압축)
+            // 아이콘 업로드
             const handleIconFileChange = async (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
@@ -282,7 +324,7 @@
                 }
             };
 
-            // 스크린샷 업로드 (최대 600px, 최대 3장 제한)
+            // 스크린샷 업로드
             const handleScreenshotsFileChange = async (e) => {
                 const files = Array.from(e.target.files);
                 if (files.length === 0) return;
@@ -313,6 +355,12 @@
             // 웹앱 신규 등록 신청 (Firestore 저장)
             const handleRegisterSubmit = async (e) => {
                 e.preventDefault();
+                if (!currentUser.uid) {
+                    showToast("웹앱을 등록하려면 먼저 로그인해 주세요.", "error");
+                    handleGoogleLogin();
+                    return;
+                }
+
                 const form = e.target;
 
                 if (!uploadedIcon) {
@@ -340,7 +388,6 @@
                         setIsUploading(true);
                         const { db, collection, addDoc } = window.FB_MODULE;
                         const appsRef = collection(db, 'apps');
-                        // Firestore에 저장하고 자동 생성된 doc.id 적용
                         await addDoc(appsRef, newAppData);
                         showToast("웹앱 등록 신청이 완료되었습니다. 관리자 검수 후 공개됩니다.");
                     } catch (err) {
@@ -350,7 +397,6 @@
                         setIsUploading(false);
                     }
                 } else {
-                    // 로컬 모드
                     const localDoc = { ...newAppData, id: 'local-' + Date.now() };
                     setApps(prev => [localDoc, ...prev]);
                     showToast("웹앱 등록 신청이 완료되었습니다 (로컬 저장).");
@@ -368,7 +414,6 @@
                     return;
                 }
 
-                // Firestore 업데이트
                 if (window.FB_MODULE && window.FB_MODULE.db) {
                     try {
                         const { db, doc, updateDoc } = window.FB_MODULE;
@@ -381,7 +426,6 @@
                         showToast(newStatus === 'approved' ? "웹앱이 승인되었습니다." : "신청이 거절 처리되었습니다.");
                     } catch (err) {
                         console.error("상태 업데이트 실패:", err);
-                        // 초기 목데이터 처리용 예외 핸들링
                         setApps(prev => prev.map(a => a.id === targetAppId ? { ...a, status: newStatus, rejectionReason: reason } : a));
                         showToast("상태가 변경되었습니다.");
                     }
@@ -407,7 +451,8 @@
             }, [apps, selectedCategory, searchQuery]);
 
             const myApps = useMemo(() => {
-                return apps.filter(app => app.developerId === currentUser.uid || currentUser.role === 'admin');
+                if (!currentUser.uid) return [];
+                return apps.filter(app => app.developerId === currentUser.uid);
             }, [apps, currentUser]);
 
             const pendingApps = useMemo(() => {
@@ -441,28 +486,35 @@
                             </div>
 
                             <div className="flex items-center space-x-2">
-                                <button
-                                    onClick={() => {
-                                        const nextRole = currentUser.role === 'user' ? 'admin' : 'user';
-                                        setCurrentUser(prev => ({ ...prev, role: nextRole }));
-                                        if (nextRole === 'admin') {
-                                            setActiveTab('admin');
-                                            showToast("관리자 검수 모드로 전환되었습니다.");
-                                        } else {
-                                            setActiveTab('home');
-                                        }
-                                    }}
-                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                                        currentUser.role === 'admin' 
-                                            ? 'bg-neutral-900 text-white' 
-                                            : 'bg-neutral-100 text-neutral-600 hover:text-neutral-900'
-                                    }`}
-                                >
-                                    {currentUser.role === 'admin' ? '관리자 모드 ON' : '일반 사용자'}
-                                </button>
+                                {currentUser.uid ? (
+                                    <div className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-neutral-100 rounded-lg text-xs font-medium text-neutral-800">
+                                        <i className="fas fa-user-circle text-neutral-500"></i>
+                                        <span className="max-w-[100px] truncate">{currentUser.name || '사용자'}</span>
+                                        {currentUser.role === 'admin' && (
+                                            <span className="ml-1 px-1.5 py-0.2 bg-neutral-900 text-white text-[10px] rounded font-bold">
+                                                ADMIN
+                                            </span>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <button
+                                        onClick={handleGoogleLogin}
+                                        className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-100 text-neutral-700 hover:bg-neutral-200 transition-colors flex items-center space-x-1"
+                                    >
+                                        <i className="fab fa-google text-xs text-rose-500"></i>
+                                        <span>로그인</span>
+                                    </button>
+                                )}
 
                                 <button
-                                    onClick={() => setIsRegisterOpen(true)}
+                                    onClick={() => {
+                                        if (!currentUser.uid) {
+                                            showToast("앱 등록을 위해 먼저 로그인해 주세요.", "error");
+                                            handleGoogleLogin();
+                                            return;
+                                        }
+                                        setIsRegisterOpen(true);
+                                    }}
                                     className="bg-neutral-900 hover:bg-neutral-800 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
                                 >
                                     앱 등록 신청
@@ -496,19 +548,21 @@
                                 스토어
                             </button>
 
-                            <button
-                                onClick={() => setActiveTab('my_apps')}
-                                className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                                    activeTab === 'my_apps' ? 'bg-neutral-900 text-white' : 'text-neutral-600 hover:bg-neutral-100'
-                                }`}
-                            >
-                                <span>내 신청 목록</span>
-                                {myApps.length > 0 && (
-                                    <span className="px-1.5 py-0.2 bg-neutral-200 text-neutral-800 text-[10px] rounded-full">
-                                        {myApps.length}
-                                    </span>
-                                )}
-                            </button>
+                            {currentUser.uid && (
+                                <button
+                                    onClick={() => setActiveTab('my_apps')}
+                                    className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                                        activeTab === 'my_apps' ? 'bg-neutral-900 text-white' : 'text-neutral-600 hover:bg-neutral-100'
+                                    }`}
+                                >
+                                    <span>내 신청 목록</span>
+                                    {myApps.length > 0 && (
+                                        <span className="px-1.5 py-0.2 bg-neutral-200 text-neutral-800 text-[10px] rounded-full">
+                                            {myApps.length}
+                                        </span>
+                                    )}
+                                </button>
+                            )}
 
                             {currentUser.role === 'admin' && (
                                 <button
@@ -697,8 +751,8 @@
                         </main>
                     )}
 
-                    {/* 3. 검수 대시보드 (관리자 모드) */}
-                    {activeTab === 'admin' && (
+                    {/* 3. 검수 대시보드 (관리자 전용) */}
+                    {activeTab === 'admin' && currentUser.role === 'admin' && (
                         <main className="space-y-4">
                             <div className="flex items-center justify-between">
                                 <h2 className="text-sm font-bold text-neutral-900">검수 대기중인 신청 목록</h2>
